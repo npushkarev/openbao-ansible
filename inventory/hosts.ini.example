@@ -1,0 +1,6 @@
+[openbao]
+bao1 ansible_host=192.0.2.10
+
+[openbao:vars]
+openbao_api_addr=https://bao.example.com:8200
+openbao_cluster_addr=https://192.0.2.10:8201

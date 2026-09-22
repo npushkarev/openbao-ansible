@@ -1,0 +1,6 @@
+---
+- name: Install OpenBao from local packages
+  hosts: openbao
+  become: true
+  roles:
+    - role: openbao
