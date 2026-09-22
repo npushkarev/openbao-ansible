@@ -10,8 +10,9 @@ openbao_arch: "{{ openbao_arch_map[ansible_architecture] | default(ansible_archi
 openbao_package_ext: "{{ 'deb' if ansible_os_family == 'Debian' else 'rpm' }}"
 openbao_package_filename: "openbao_{{ openbao_version }}_linux_{{ openbao_arch }}.{{ openbao_package_ext }}"
 
-openbao_api_addr: ""
-openbao_cluster_addr: ""
+openbao_bind_host: "{{ ansible_host | default(inventory_hostname, true) }}"
+openbao_api_addr: "https://{{ openbao_bind_host }}:8200"
+openbao_cluster_addr: "https://{{ openbao_bind_host }}:8201"
 openbao_ui: true
 openbao_node_id: "{{ inventory_hostname }}"
 

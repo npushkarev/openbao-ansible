@@ -7,15 +7,6 @@
       Эта роль ставит локальный deb или rpm.
       Семейство {{ ansible_os_family }} не поддерживается.
 
-- name: Require API and cluster addresses
-  ansible.builtin.assert:
-    that:
-      - openbao_api_addr | length > 0
-      - openbao_cluster_addr | length > 0
-    fail_msg: >-
-      Задайте openbao_api_addr и openbao_cluster_addr в inventory.
-      Сертификат должен быть выписан на имя из openbao_api_addr.
-
 - name: Check that the openssl CLI is already installed
   ansible.builtin.command: openssl version
   register: openbao_openssl
@@ -41,18 +32,18 @@
     - "{{ openbao_tls_cert_src }}"
     - "{{ openbao_tls_key_src }}"
 
-- name: Fail when required files were not brought inside the contour
+- name: Fail when the package or checksum file is missing
   ansible.builtin.assert:
     that:
       - item.stat.exists
-    fail_msg: "Нет файла {{ item.stat.path | default(item.item) }}. Положите его в files/ до запуска."
+    fail_msg: "Нет файла {{ item.item }}."
   loop: "{{ openbao_local_files.results }}"
-  when: item.item != openbao_files_dir + '/checksums.txt' or openbao_verify_checksum | bool
+  when: item.item is match('.*(checksums\\.txt|' ~ openbao_package_filename ~ ')$')
 
 - name: Verify the package checksum on the control node
   ansible.builtin.shell: |
     set -euo pipefail
-    line=$(grep -F "{{ openbao_package_filename }}" checksums.txt)
+    line=$(awk -v name="{{ openbao_package_filename }}" '$NF == name || $NF == "*" name { print; exit }' checksums.txt)
     test -n "$line"
     if command -v sha256sum >/dev/null 2>&1; then
       printf '%s\n' "$line" | sha256sum -c -
@@ -124,7 +115,7 @@
     - { path: "{{ openbao_data_dir }}", owner: "{{ openbao_user }}", mode: "0700" }
     - { path: "{{ openbao_tls_dir }}", owner: root, mode: "0750" }
 
-- name: Install the TLS certificate and key
+- name: Install the supplied TLS certificate and key
   ansible.builtin.copy:
     src: "{{ item.src }}"
     dest: "{{ item.dest }}"
@@ -134,7 +125,47 @@
   loop:
     - { src: "{{ openbao_tls_cert_src }}", dest: "{{ openbao_tls_dir }}/tls.crt", mode: "0644" }
     - { src: "{{ openbao_tls_key_src }}", dest: "{{ openbao_tls_dir }}/tls.key", mode: "0640" }
+  when: openbao_local_files.results[2].stat.exists and openbao_local_files.results[3].stat.exists
   notify: Restart OpenBao
+
+- name: Write the OpenSSL config for a generated certificate
+  ansible.builtin.template:
+    src: openssl-san.cnf.j2
+    dest: /tmp/openbao-openssl.cnf
+    mode: "0600"
+  when: not (openbao_local_files.results[2].stat.exists and openbao_local_files.results[3].stat.exists)
+
+- name: Generate a TLS certificate on the host
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -x509
+      - -newkey
+      - rsa:2048
+      - -nodes
+      - -keyout
+      - "{{ openbao_tls_dir }}/tls.key"
+      - -out
+      - "{{ openbao_tls_dir }}/tls.crt"
+      - -days
+      - "825"
+      - -config
+      - /tmp/openbao-openssl.cnf
+    creates: "{{ openbao_tls_dir }}/tls.crt"
+  when: not (openbao_local_files.results[2].stat.exists and openbao_local_files.results[3].stat.exists)
+  notify: Restart OpenBao
+
+- name: Restrict the generated TLS key
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: root
+    group: "{{ openbao_group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ openbao_tls_dir }}/tls.crt", mode: "0644" }
+    - { path: "{{ openbao_tls_dir }}/tls.key", mode: "0640" }
+  when: not (openbao_local_files.results[2].stat.exists and openbao_local_files.results[3].stat.exists)
 
 - name: Write the server configuration
   ansible.builtin.template:

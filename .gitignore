@@ -1,8 +1,4 @@
 inventory/hosts.ini
-files/*.deb
-files/*.rpm
-files/*.tar.gz
-files/checksums.txt
 files/tls.crt
 files/tls.key
 *.retry
