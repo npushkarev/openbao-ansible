@@ -5,3 +5,4 @@ files/tls.key
 *.retry
 .vault_pass
 .vault_pass.txt
+files/openbao_*_linux_arm64.*

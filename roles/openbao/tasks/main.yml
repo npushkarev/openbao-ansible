@@ -1,184 +1,90 @@
 ---
-- name: Require a supported operating system
+- name: Require a supported system
   ansible.builtin.assert:
     that:
-      - ansible_os_family in ["Debian", "RedHat"]
+      - ansible_facts['os_family'] in ["Debian", "RedHat"]
+      - ansible_facts['architecture'] == "x86_64"
     fail_msg: >-
-      Эта роль ставит локальный deb или rpm.
-      Семейство {{ ansible_os_family }} не поддерживается.
+      Пакеты в files/ для x86_64 на Debian, Ubuntu или RHEL-подобной системе.
+      На {{ inventory_hostname }}: {{ ansible_facts['os_family'] }}, {{ ansible_facts['architecture'] }}.
 
-- name: Check that the openssl CLI is already installed
-  ansible.builtin.command: openssl version
-  register: openbao_openssl
-  changed_when: false
-  failed_when: false
-
-- name: Stop when openssl is missing from the OS image
-  ansible.builtin.fail:
-    msg: >-
-      На хосте нет openssl. Поставьте его с установочного носителя ОС:
-      пакет OpenBao вызывает openssl при установке и из сети его не скачивает.
-  when: openbao_openssl.rc != 0
-
-- name: Locate the package and TLS material on the control node
-  ansible.builtin.stat:
-    path: "{{ item }}"
-  delegate_to: localhost
-  become: false
-  register: openbao_local_files
-  loop:
-    - "{{ openbao_files_dir }}/{{ openbao_package_filename }}"
-    - "{{ openbao_files_dir }}/checksums.txt"
-    - "{{ openbao_tls_cert_src }}"
-    - "{{ openbao_tls_key_src }}"
-
-- name: Fail when the package or checksum file is missing
+- name: Check the role variables
   ansible.builtin.assert:
     that:
-      - item.stat.exists
-    fail_msg: "Нет файла {{ item.item }}."
-  loop: "{{ openbao_local_files.results }}"
-  when: item.item is match('.*(checksums\\.txt|' ~ openbao_package_filename ~ ')$')
+      - openbao_version | length > 0
+      - openbao_auto_unseal is none or openbao_auto_unseal | string | lower in ['', 'true', 'false', 'yes', 'no', '1', '0', 'on', 'off']
+      - ((openbao_files_dir ~ '/tls.crt') is file) == ((openbao_files_dir ~ '/tls.key') is file)
+    fail_msg: >-
+      Проверьте переменные: openbao_auto_unseal — true, false или пусто;
+      для своего сертификата нужны оба файла, files/tls.crt и files/tls.key.
 
-- name: Verify the package checksum on the control node
-  ansible.builtin.shell: |
-    set -euo pipefail
-    line=$(awk -v name="{{ openbao_package_filename }}" '$NF == name || $NF == "*" name { print; exit }' checksums.txt)
-    test -n "$line"
-    if command -v sha256sum >/dev/null 2>&1; then
-      printf '%s\n' "$line" | sha256sum -c -
-    else
-      printf '%s\n' "$line" | shasum -a 256 -c -
-    fi
-  args:
-    chdir: "{{ openbao_files_dir }}"
-    executable: /bin/bash
-  delegate_to: localhost
-  become: false
-  changed_when: false
-  when: openbao_verify_checksum | bool
+- name: Pick the package for this host
+  ansible.builtin.set_fact:
+    openbao_package: >-
+      openbao_{{ openbao_version }}_linux_amd64.{{ 'deb' if ansible_facts['os_family'] == 'Debian' else 'rpm' }}
+    openbao_own_cert: "{{ (openbao_files_dir ~ '/tls.crt') is file }}"
+    openbao_auto_unseal_env: >-
+      {{ '' if openbao_auto_unseal is none or openbao_auto_unseal | string == ''
+         else ('1' if openbao_auto_unseal | bool else '0') }}
 
-- name: Copy the OpenBao package to the host
-  ansible.builtin.copy:
-    src: "{{ openbao_files_dir }}/{{ openbao_package_filename }}"
-    dest: "/tmp/{{ openbao_package_filename }}"
-    mode: "0644"
-
-- name: Read the installed Debian package version
-  ansible.builtin.command: dpkg-query -W -f '${Version}' openbao
-  register: openbao_deb_version
-  changed_when: false
-  failed_when: false
-  when: ansible_os_family == "Debian"
-
-- name: Install the Debian package
-  ansible.builtin.command:
-    argv:
-      - dpkg
-      - -i
-      - "/tmp/{{ openbao_package_filename }}"
-  when:
-    - ansible_os_family == "Debian"
-    - openbao_deb_version.rc != 0 or openbao_version not in openbao_deb_version.stdout
-
-- name: Read the installed RPM package version
-  ansible.builtin.command: rpm -q --qf '%{VERSION}' openbao
-  register: openbao_rpm_version
-  changed_when: false
-  failed_when: false
-  when: ansible_os_family == "RedHat"
-
-- name: Install the RPM package
-  ansible.builtin.command:
-    argv:
-      - rpm
-      - -Uvh
-      - --nosignature
-      - "/tmp/{{ openbao_package_filename }}"
-  when:
-    - ansible_os_family == "RedHat"
-    - openbao_rpm_version.rc != 0 or openbao_version not in openbao_rpm_version.stdout
-
-- name: Remove the package from temporary storage
+- name: Create the installer directory
   ansible.builtin.file:
-    path: "/tmp/{{ openbao_package_filename }}"
-    state: absent
-
-- name: Create the data and TLS directories
-  ansible.builtin.file:
-    path: "{{ item.path }}"
+    path: "{{ item }}"
     state: directory
-    owner: "{{ item.owner }}"
-    group: "{{ openbao_group }}"
-    mode: "{{ item.mode }}"
+    owner: root
+    group: root
+    mode: "0700"
   loop:
-    - { path: "{{ openbao_data_dir }}", owner: "{{ openbao_user }}", mode: "0700" }
-    - { path: "{{ openbao_tls_dir }}", owner: root, mode: "0750" }
+    - "{{ openbao_bundle_dir }}"
+    - "{{ openbao_bundle_dir }}/files"
 
-- name: Install the supplied TLS certificate and key
+# install.sh checks the package against checksums.txt on the host before installing it.
+- name: Copy the installer and the package
   ansible.builtin.copy:
     src: "{{ item.src }}"
-    dest: "{{ item.dest }}"
+    dest: "{{ openbao_bundle_dir }}/{{ item.dest }}"
     owner: root
-    group: "{{ openbao_group }}"
+    group: root
     mode: "{{ item.mode }}"
   loop:
-    - { src: "{{ openbao_tls_cert_src }}", dest: "{{ openbao_tls_dir }}/tls.crt", mode: "0644" }
-    - { src: "{{ openbao_tls_key_src }}", dest: "{{ openbao_tls_dir }}/tls.key", mode: "0640" }
-  when: openbao_local_files.results[2].stat.exists and openbao_local_files.results[3].stat.exists
-  notify: Restart OpenBao
+    - { src: "{{ openbao_installer }}", dest: install.sh, mode: "0700" }
+    - { src: "{{ openbao_files_dir }}/openbao-unseal", dest: files/openbao-unseal, mode: "0700" }
+    - { src: "{{ openbao_files_dir }}/checksums.txt", dest: files/checksums.txt, mode: "0600" }
+    - { src: "{{ openbao_files_dir }}/{{ openbao_package }}", dest: "files/{{ openbao_package }}", mode: "0600" }
+  loop_control:
+    label: "{{ item.dest }}"
 
-- name: Write the OpenSSL config for a generated certificate
-  ansible.builtin.template:
-    src: openssl-san.cnf.j2
-    dest: /tmp/openbao-openssl.cnf
+- name: Copy the supplied TLS certificate and key
+  ansible.builtin.copy:
+    src: "{{ openbao_files_dir }}/{{ item }}"
+    dest: "{{ openbao_bundle_dir }}/files/{{ item }}"
+    owner: root
+    group: root
     mode: "0600"
-  when: not (openbao_local_files.results[2].stat.exists and openbao_local_files.results[3].stat.exists)
+  loop: [tls.crt, tls.key]
+  when: openbao_own_cert | bool
+  diff: false
 
-- name: Generate a TLS certificate on the host
-  ansible.builtin.command:
-    argv:
-      - openssl
-      - req
-      - -x509
-      - -newkey
-      - rsa:2048
-      - -nodes
-      - -keyout
-      - "{{ openbao_tls_dir }}/tls.key"
-      - -out
-      - "{{ openbao_tls_dir }}/tls.crt"
-      - -days
-      - "825"
-      - -config
-      - /tmp/openbao-openssl.cnf
-    creates: "{{ openbao_tls_dir }}/tls.crt"
-  when: not (openbao_local_files.results[2].stat.exists and openbao_local_files.results[3].stat.exists)
-  notify: Restart OpenBao
-
-- name: Restrict the generated TLS key
+- name: Drop a certificate that is no longer supplied
   ansible.builtin.file:
-    path: "{{ item.path }}"
-    owner: root
-    group: "{{ openbao_group }}"
-    mode: "{{ item.mode }}"
-  loop:
-    - { path: "{{ openbao_tls_dir }}/tls.crt", mode: "0644" }
-    - { path: "{{ openbao_tls_dir }}/tls.key", mode: "0640" }
-  when: not (openbao_local_files.results[2].stat.exists and openbao_local_files.results[3].stat.exists)
+    path: "{{ openbao_bundle_dir }}/files/{{ item }}"
+    state: absent
+  loop: [tls.crt, tls.key]
+  when: not (openbao_own_cert | bool)
 
-- name: Write the server configuration
-  ansible.builtin.template:
-    src: openbao.hcl.j2
-    dest: "{{ openbao_config_file }}"
-    owner: root
-    group: "{{ openbao_group }}"
-    mode: "0640"
-  notify: Restart OpenBao
+# stdin from /dev/null: over SSH Ansible gives the module a terminal, and
+# openbao-unseal would wait for a key typed into it.
+- name: Run install.sh
+  ansible.builtin.shell:
+    cmd: bash {{ (openbao_bundle_dir ~ '/install.sh') | quote }} </dev/null
+  environment:
+    OPENBAO_API_ADDR: "{{ openbao_api_addr }}"
+    OPENBAO_CLUSTER_ADDR: "{{ openbao_cluster_addr }}"
+    OPENBAO_FIREWALL: "{{ '1' if openbao_firewall | bool else '0' }}"
+    OPENBAO_AUTO_UNSEAL: "{{ openbao_auto_unseal_env | trim }}"
+  register: openbao_install
+  changed_when: "'Изменений нет.' not in openbao_install.stdout_lines"
 
-- name: Enable and start OpenBao
-  ansible.builtin.systemd:
-    name: openbao
-    enabled: true
-    state: started
-    daemon_reload: true
+- name: Show what install.sh did
+  ansible.builtin.debug:
+    msg: "{{ openbao_install.stdout_lines | reject('match', '^$') | list }}"

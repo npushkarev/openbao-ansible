@@ -1,2 +1,4 @@
 [openbao]
-bao1 ansible_host=192.0.2.10
+bao1 ansible_host=192.0.2.10 ansible_user=admin
+# Вход под root на машине без sudo:
+# bao2 ansible_host=192.0.2.11 ansible_user=root ansible_become=false

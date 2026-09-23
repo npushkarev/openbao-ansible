@@ -1,0 +1,4 @@
+# The installer must reach Linux with LF line endings, also from a Windows checkout.
+* text=auto eol=lf
+*.deb binary
+*.rpm binary

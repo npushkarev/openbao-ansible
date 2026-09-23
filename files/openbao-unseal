@@ -1,0 +1,123 @@
+#!/bin/bash
+# Unseal the local OpenBao. install.sh puts this file at /usr/local/sbin/openbao-unseal.
+#   sudo openbao-unseal          keys from /root/openbao-init.txt, or a hidden prompt if the file is gone
+#   openbao-unseal --boot        for systemd (OPENBAO_AUTO_UNSEAL=1): quiet when there is nothing to do
+# Keys go to OpenBao on stdin, never on the command line.
+
+set -euo pipefail
+
+INIT_FILE="/root/openbao-init.txt"
+CONFIG="/etc/openbao/openbao.hcl"
+PORT=8200
+
+boot=0
+if [[ "${1:-}" == "--boot" ]]; then
+  boot=1
+fi
+
+die() {
+  echo "$*" >&2
+  exit 1
+}
+
+conf_value() {
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$CONFIG" 2>/dev/null | head -n 1 || true
+}
+
+for var in $(compgen -e); do
+  case "$var" in
+    BAO_* | VAULT_*) unset "$var" ;;
+  esac
+done
+
+# Talk to the local listener, but check the certificate for the name clients use.
+listen="$(conf_value address)"
+listen_host="${listen%:*}"
+listen_port="${listen##*:}"
+case "$listen_host" in
+  "" | 0.0.0.0 | "[::]" | "::") listen_host="127.0.0.1" ;;
+esac
+if [[ ! "$listen_port" =~ ^[0-9]+$ ]]; then
+  listen_port="$PORT"
+fi
+api_addr="$(conf_value api_addr)"
+host="${api_addr#*://}"
+host="${host%%/*}"
+host="${host%%:*}"
+export BAO_ADDR="https://${listen_host}:${listen_port}"
+export BAO_CACERT="/etc/openbao/tls/tls.crt"
+if [[ -n "$host" ]]; then
+  export BAO_TLS_SERVER_NAME="$host"
+fi
+
+status=""
+read_status() {
+  local rc=0
+  status="$(BAO_CLIENT_TIMEOUT=5s bao status -format=json 2>&1)" || rc=$?
+  [[ "$rc" -eq 0 || "$rc" -eq 2 ]]
+}
+json_value() {
+  sed -n "s/^[[:space:]]*\"$1\":[[:space:]]*\\([0-9a-z]*\\).*/\\1/p" <<<"$status" | head -n 1
+}
+submit() {
+  if ! printf '%s' "$1" | bao write -format=json sys/unseal key=- >/dev/null; then
+    die "OpenBao не принял ключ."
+  fi
+  read_status || true
+}
+
+ready=0
+for _ in $(seq 1 60); do
+  if read_status; then
+    ready=1
+    break
+  fi
+  sleep 1
+done
+if [[ "$ready" -ne 1 ]]; then
+  echo "$status" >&2
+  die "OpenBao не отвечает на ${BAO_ADDR}. Смотрите: journalctl -u openbao -n 50"
+fi
+
+if [[ "$(json_value initialized)" == "false" ]]; then
+  if [[ "$boot" -eq 1 ]]; then
+    exit 0
+  fi
+  die "OpenBao ещё не инициализирован. Запустите install.sh."
+fi
+if [[ "$(json_value sealed)" == "false" ]]; then
+  if [[ "$boot" -eq 0 ]]; then
+    echo "OpenBao уже распечатан."
+  fi
+  exit 0
+fi
+
+# Every key from the file, in order, until the threshold is reached.
+if [[ -r "$INIT_FILE" ]]; then
+  while IFS= read -r key; do
+    submit "$key"
+    if [[ "$(json_value sealed)" == "false" ]]; then
+      echo "Печать снята."
+      exit 0
+    fi
+  done < <(awk -F': ' '/^Unseal Key [0-9]+:/ {print $2}' "$INIT_FILE")
+fi
+
+if [[ "$boot" -eq 1 ]]; then
+  echo "OpenBao запечатан, а ключей в ${INIT_FILE} не хватает: снимите печать вручную (sudo openbao-unseal)." >&2
+  exit 0
+fi
+if [[ ! -t 0 ]]; then
+  die "Ключей в ${INIT_FILE} нет или не хватает. Запустите sudo openbao-unseal в терминале и введите ключ."
+fi
+while [[ "$(json_value sealed)" != "false" ]]; do
+  progress="$(json_value progress)"
+  threshold="$(json_value t)"
+  read -r -s -p "Ключ unseal (принято ${progress:-0} из ${threshold:-?}): " key
+  echo
+  if [[ -z "$key" ]]; then
+    die "Ключ не введён, сервер остался запечатан."
+  fi
+  submit "$key"
+done
+echo "Печать снята."

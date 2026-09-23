@@ -1,27 +1,26 @@
 ---
-openbao_version: "2.6.2"
+# The role copies install.sh and the package to the host and runs install.sh there,
+# so a playbook run and a manual 'sudo ./install.sh' do exactly the same thing.
+openbao_installer: "{{ playbook_dir }}/install.sh"
 openbao_files_dir: "{{ playbook_dir }}/files"
-openbao_verify_checksum: true
+# Taken from install.sh, so the version is changed in one place only.
+openbao_version: >-
+  {{ lookup('ansible.builtin.file', openbao_installer)
+     | regex_search('(?m)^VERSION="([^"]+)"', '\1') | first }}
 
-openbao_arch_map:
-  x86_64: amd64
-  aarch64: arm64
-openbao_arch: "{{ openbao_arch_map[ansible_architecture] | default(ansible_architecture) }}"
-openbao_package_ext: "{{ 'deb' if ansible_os_family == 'Debian' else 'rpm' }}"
-openbao_package_filename: "openbao_{{ openbao_version }}_linux_{{ openbao_arch }}.{{ openbao_package_ext }}"
+# Where the installer stays on the host. 'sudo bash /root/openbao-install/install.sh'
+# can be re-run from there by hand.
+openbao_bundle_dir: /root/openbao-install
 
-openbao_bind_host: "{{ ansible_host | default(inventory_hostname, true) }}"
-openbao_api_addr: "https://{{ openbao_bind_host }}:8200"
-openbao_cluster_addr: "https://{{ openbao_bind_host }}:8201"
-openbao_ui: true
-openbao_node_id: "{{ inventory_hostname }}"
+# Address clients use; the certificate is issued for it. install.sh rewrites
+# openbao.hcl only when this differs from the address already in it.
+# Empty: keep the address from the existing config, or detect it on the host.
+openbao_api_addr: "https://{{ ansible_host | default(inventory_hostname, true) }}:8200"
+openbao_cluster_addr: ""
 
-openbao_user: openbao
-openbao_group: openbao
-openbao_config_dir: /etc/openbao
-openbao_config_file: /etc/openbao/openbao.hcl
-openbao_tls_dir: /etc/openbao/tls
-openbao_data_dir: /opt/openbao/data
+# Open 8200/tcp in firewalld or ufw when one of them is running.
+openbao_firewall: true
 
-openbao_tls_cert_src: "{{ openbao_files_dir }}/tls.crt"
-openbao_tls_key_src: "{{ openbao_files_dir }}/tls.key"
+# true: unseal automatically after every start of the service, with the key
+# from /root/openbao-init.txt. false: turn it off. Empty: leave as it is.
+openbao_auto_unseal: ""
